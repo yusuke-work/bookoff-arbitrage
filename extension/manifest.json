@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "ブックオフ→メルカリ 利益リサーチ",
+  "version": "1.0.0",
+  "description": "ブックオフオンラインの商品をメルカリ相場と比較し、利益商品をリストアップします",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://shopping.bookoff.co.jp/*",
+    "http://localhost:8000/*"
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "利益リサーチ"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://shopping.bookoff.co.jp/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  }
+}
