@@ -17,50 +17,46 @@
   function extractProducts() {
     const products = [];
 
-    // ブックオフオンラインの商品カードセレクタ
-    // ※ サイト改修時はここを修正する
-    const itemSelectors = [
-      ".c-product-item",         // 一般商品一覧
-      ".p-search-result__item",  // 検索結果
-      ".swiper-slide",           // おすすめ等スライダー（除外したい場合はコメントアウト）
-    ];
-
-    let itemElements = [];
-    for (const sel of itemSelectors) {
-      const found = document.querySelectorAll(sel);
-      if (found.length > 0) {
-        itemElements = Array.from(found);
-        break;
-      }
-    }
+    // 商品カード要素を取得
+    // 実際のHTMLでは ".productItem" クラスが使われている
+    const itemElements = Array.from(document.querySelectorAll(".productItem"));
 
     for (const el of itemElements) {
       try {
         // タイトル
-        const titleEl =
-          el.querySelector(".c-product-item__title") ||
-          el.querySelector(".p-search-result__title") ||
-          el.querySelector("h2") ||
-          el.querySelector("h3");
+        const titleEl = el.querySelector(".productItem__title");
         const title = titleEl ? titleEl.textContent.trim() : null;
 
         // 価格（税込）
-        const priceEl =
-          el.querySelector(".c-product-item__price") ||
-          el.querySelector(".p-search-result__price") ||
-          el.querySelector("[class*='price']");
-        const priceText = priceEl ? priceEl.textContent.trim() : "";
-        // 「1,234円」→ 1234
+        // .productItem__price の中に "&yen;1,234" 形式のテキストが含まれる
+        // 子要素（<small>など）のテキストを除外するため、firstChildのtextContentを使う
+        const priceEl = el.querySelector(".productItem__price");
+        let priceText = "";
+        if (priceEl) {
+          // firstChild はテキストノード（例: "¥110"）
+          // childNodes[0] が価格の数値部分
+          const firstTextNode = Array.from(priceEl.childNodes).find(
+            (node) => node.nodeType === Node.TEXT_NODE
+          );
+          priceText = firstTextNode ? firstTextNode.textContent.trim() : priceEl.textContent.trim();
+        }
+        // 「¥1,234」→ 1234
         const price = parseInt(priceText.replace(/[^0-9]/g, ""), 10);
 
         // 商品URL
-        const linkEl = el.querySelector("a[href]");
+        // ".productItem__link" または ".productItem__image" のaタグを使う
+        const linkEl =
+          el.querySelector("a.productItem__link") ||
+          el.querySelector("a.productItem__image") ||
+          el.querySelector("a[href]");
         const url = linkEl
           ? new URL(linkEl.getAttribute("href"), location.origin).href
           : location.href;
 
         // サムネイル
-        const imgEl = el.querySelector("img");
+        const imgEl =
+          el.querySelector(".productItem__image img") ||
+          el.querySelector("img");
         const imageUrl = imgEl ? imgEl.src : "";
 
         if (title && !isNaN(price) && price > 0) {
@@ -83,7 +79,6 @@
       console.log(`[リサーチ] ${products.length} 件の商品を検出`);
       sendResponse({ products });
     }
-    // 非同期応答のために true を返す必要はないが念のため
     return true;
   });
 

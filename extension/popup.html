@@ -86,7 +86,12 @@
     }
 
     /* 結果リスト */
-    #results { margin-top: 12px; }
+    #results {
+      margin-top: 12px;
+      max-height: 350px;
+      overflow-y: auto;
+      padding-right: 4px; /* スクロールバー用の余白 */
+    }
     .result-item {
       background: #fff;
       border: 1px solid #e0e0e0;

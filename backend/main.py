@@ -4,25 +4,33 @@
 # Chrome拡張機能から商品リストを受け取り、メルカリ相場調査を行う
 # ============================================================
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
 import asyncio
+import time
 
-from backend.mercari_scraper import get_mercari_median_price
-from backend.spreadsheet import append_profitable_items
+from mercari_scraper import get_mercari_median_price, _scraper_instance
+from spreadsheet import append_profitable_items
 
 app = FastAPI(title="ブックオフせどりリサーチAPI")
 
 # Chrome拡張機能からのリクエストを許可
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["chrome-extension://*", "http://localhost"],
+    allow_origins=["http://localhost"],
+    allow_origin_regex=r"chrome-extension://.*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---- サーバーライフサイクル ----------------------------------
+@app.on_event("shutdown")
+async def shutdown_event():
+    """サーバー終了時に Playwright のブラウザ等のリソースをクリーンアップ"""
+    await _scraper_instance.close()
 
 # ---- 利益計算の定数 ------------------------------------------
 
@@ -39,8 +47,15 @@ SHIPPING_COST = {
 }
 
 # ---- ジョブ管理（インメモリ）---------------------------------
-# { job_id: { "products": [...], "results": [...], "done": int, "finished": bool } }
-jobs: dict = {}
+# { job_id: { "products": [...], "results": [...], "done": int, "finished": bool, "created_at": float } }
+jobs: dict[str, dict] = {}
+
+def cleanup_old_jobs(max_age_seconds: int = 3600):
+    """一定時間経過した古いジョブを削除してメモリリークを防ぐ"""
+    now = time.time()
+    stale_jobs = [j_id for j_id, j_data in jobs.items() if now - j_data["created_at"] > max_age_seconds]
+    for j_id in stale_jobs:
+        del jobs[j_id]
 
 # ---- スキーマ ------------------------------------------------
 
@@ -52,21 +67,29 @@ class Product(BaseModel):
 
 class ResearchRequest(BaseModel):
     products: List[Product]
+    min_profit: int = 500
+    min_margin: float = 30.0
 
 # ---- エンドポイント ------------------------------------------
 
 @app.post("/research")
-async def start_research(req: ResearchRequest):
+async def start_research(req: ResearchRequest, background_tasks: BackgroundTasks):
     """調査ジョブを開始して job_id を返す"""
+    # 定期的に古いジョブをお掃除
+    cleanup_old_jobs()
+
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
-        "products": [p.dict() for p in req.products],
+        "products": [p.model_dump() for p in req.products],
         "results": [],
         "done": 0,
         "finished": False,
+        "created_at": time.time(),
+        "min_profit": req.min_profit,
+        "min_margin": req.min_margin,
     }
     # バックグラウンドで調査を実行
-    asyncio.create_task(run_research(job_id))
+    background_tasks.add_task(run_research, job_id)
     return {"job_id": job_id, "total": len(req.products)}
 
 
@@ -98,20 +121,20 @@ async def run_research(job_id: str):
     job = jobs[job_id]
     profitable_items = []
 
+    min_profit = job.get("min_profit", 500)
+    min_margin = job.get("min_margin", 30.0)
+
     for product in job["products"]:
         try:
             result = await analyze_product(product)
             if result:
                 job["results"].append(result)
-                if result["profit"] > 0:
+                if result["profit"] >= min_profit and result["margin"] >= min_margin:
                     profitable_items.append(result)
         except Exception as e:
             print(f"[ERROR] {product['title']}: {e}")
         finally:
             job["done"] += 1
-
-        # 連続リクエストを避けるため待機（2〜4秒のランダムウェイト）
-        await asyncio.sleep(2 + (hash(product["title"]) % 20) / 10)
 
     job["finished"] = True
 
@@ -128,8 +151,8 @@ async def analyze_product(product: dict) -> Optional[dict]:
     buy_price = product["price"]
     title = product["title"]
 
-    # メルカリの売却済み相場（中央値）を取得
-    median_price = await asyncio.to_thread(get_mercari_median_price, title)
+    # メルカリの売却済み相場（中央値）を取得（Playwrightの並行処理管理を含む）
+    median_price = await get_mercari_median_price(title)
 
     if median_price is None or median_price == 0:
         return None

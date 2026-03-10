@@ -19,11 +19,24 @@ const minMarginInput = document.getElementById("minMargin");
 
 // ---- 初期化 --------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
-  // 保存済みの閾値を復元
-  chrome.storage.local.get(["minProfit", "minMargin"], (data) => {
-    if (data.minProfit != null) minProfitInput.value = data.minProfit;
-    if (data.minMargin != null) minMarginInput.value = data.minMargin;
-  });
+  // 保存済みの設定と実行中のジョブを復元
+  chrome.storage.local.get(
+    ["minProfit", "minMargin", "currentJobId", "totalItems"],
+    (data) => {
+      const minProfit = data.minProfit != null ? data.minProfit : 500;
+      const minMargin = data.minMargin != null ? data.minMargin : 30;
+
+      minProfitInput.value = minProfit;
+      minMarginInput.value = minMargin;
+
+      // もし実行中のジョブ状態が残っていればポーリングを再開
+      if (data.currentJobId && data.totalItems) {
+        startBtn.disabled = true;
+        showProgress(0, data.totalItems); // プログレスバーの初期化
+        startPolling(data.currentJobId, data.totalItems, minProfit, minMargin);
+      }
+    }
+  );
 
   startBtn.addEventListener("click", onStart);
 });
@@ -35,14 +48,15 @@ async function onStart() {
   resultsDiv.innerHTML = "";
   startBtn.disabled = true;
 
-  // 閾値を保存
+  // 閾値を保存して、以前のジョブIDをクリア
   const minProfit = parseInt(minProfitInput.value, 10) || 500;
   const minMargin = parseInt(minMarginInput.value, 10) || 30;
   chrome.storage.local.set({ minProfit, minMargin });
+  chrome.storage.local.remove(["currentJobId", "totalItems"]);
 
   try {
     // background.js 経由で調査開始
-    const result = await sendMessage({ type: "START_RESEARCH" });
+    const result = await sendMessage({ type: "START_RESEARCH", minProfit, minMargin });
     if (result.error) throw new Error(result.error);
 
     const { job_id, total } = result;
@@ -64,24 +78,38 @@ function startPolling(jobId, total, minProfit, minMargin) {
       const res = await fetch(
         `${BACKEND_URL}/status/${jobId}?min_profit=${minProfit}&min_margin=${minMargin}`
       );
+      
+      // バックエンドが再起動された場合などは 404 が返るためジョブを破棄してリセット
+      if (res.status === 404) {
+        throw new Error("ジョブが見つかりません。サーバーが再起動された可能性があります。");
+      }
       if (!res.ok) throw new Error(`ステータス取得失敗: ${res.status}`);
+      
       const data = await res.json();
 
       showProgress(data.done, total);
       renderResults(data.profitable_items);
 
       if (data.finished) {
-        clearInterval(pollTimer);
-        startBtn.disabled = false;
-        progressDiv.style.display = "none";
+        stopPollingAndCleanup();
         if (data.profitable_items.length === 0) setEmpty(true);
       }
     } catch (err) {
-      clearInterval(pollTimer);
+      stopPollingAndCleanup();
       setError("進捗取得エラー: " + err.message);
-      startBtn.disabled = false;
     }
   }, 2000); // 2秒ごとにポーリング
+}
+
+function stopPollingAndCleanup() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  startBtn.disabled = false;
+  progressDiv.style.display = "none";
+  // 調査完了後はジョブIDのキャッシュを削除（再リロード時に再開させないため）
+  chrome.storage.local.remove(["currentJobId", "totalItems"]);
 }
 
 // ---- UI ヘルパー --------------------------------------------
@@ -92,6 +120,8 @@ function showProgress(done, total) {
 }
 
 function renderResults(items) {
+  // 更新前に現在のスクロール位置を記憶する対応が必要であればやるが、
+  // 今回は結果が追加される度に追記ではなく上書きなのでスクロールが上に飛んでしまう。
   resultsDiv.innerHTML = "";
   for (const item of items) {
     const div = document.createElement("div");
